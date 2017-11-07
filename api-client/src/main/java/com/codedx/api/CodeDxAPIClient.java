@@ -1,20 +1,19 @@
 /*
  * Copyright (c) 2017. Code Dx, Inc. All Rights Reserved.
- * Author: Code Dx, Inc - Brandon Thorne
- * Project: codedx-intellij-plugin
+ * Author: Code Dx, Inc
+ * Project: api-client
  * ClassName: api.CodeDxAPIClient
  * FileName: CodeDxAPIClient.java
  */
 
 package com.codedx.api;
 
+import com.codedx.error.*;
 import com.codedx.security.CodeDxSslEngineFactory;
 import com.codedx.model.api.*;
 import com.codedx.model.x.*;
-import com.codedx.exception.*;
 import com.codedx.handlers.*;
 import com.codedx.util.JsonUtil;
-import com.fasterxml.jackson.databind.ObjectMapper;
 
 import org.asynchttpclient.*;
 import org.asynchttpclient.request.body.multipart.FilePart;
@@ -26,14 +25,10 @@ import java.io.IOException;
 import java.net.MalformedURLException;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.concurrent.*;
+import java.util.*;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
-
-// CodeDxAPIClient implementation for Intellij plugin. Adapted and used code from eclipse plugin - CodeDxAPIClient.java Author: Applied Visions, Inc. - Chris Ellsworth
 public class CodeDxAPIClient {
 
 	private AsyncHttpClient client;
@@ -96,7 +91,7 @@ public class CodeDxAPIClient {
 		try {
 			this.client.close();
 		} catch (IOException e) {
-			//logger.warn("IOException when trying to close Code Dx API client", e);
+			// TODO handle this
 		}
 	}
 
@@ -117,7 +112,7 @@ public class CodeDxAPIClient {
 	}
 
 	/**
-	 * Getter for the SslEngineFactory. Used in {} to set up Details View Connection with same SSL factory
+	 * Getter for the SslEngineFactory.
 	 *
 	 * @return the SslEngineFactory for the client
 	 */
@@ -148,7 +143,7 @@ public class CodeDxAPIClient {
 	}
 
 	/**
-	 * Sets the realm for this class. This should be called when user credentials change. ie. User clicks apply
+	 * Sets the realm for this class. This should be called when user credentials change.
 	 *
 	 * @param username          - username for the connection
 	 * @param password          - password for the connection
@@ -159,55 +154,20 @@ public class CodeDxAPIClient {
 	}
 
 	/**
-	 * Helper function to handle request expected error cases. Logs the exception to the IntelliJ  Passes error handling to the handler
-	 *
-	 * @param handler - The BaseClientHandler that will handle all of the error cases. See {handlers} for implementations of this interface
-	 * @param t       - The exception that was thrown during the API query
-	 */
-	private <T> void handleAllErrors(BaseClientHandler<T> handler, Throwable t) {
-
-		//logger.warn(t);
-
-		//check if root cause is because of ssl
-		if (t.getCause() instanceof javax.net.ssl.SSLException) {
-			handler.onExpectedError(CodeDxError.SSL_ERROR);
-		} else if (t instanceof MalformedURLException) {
-			handler.onExpectedError(CodeDxError.INVALID_URL);
-		} else if (t instanceof ExecutionException) {
-			handler.onExpectedError(CodeDxError.FAILED_EXECUTE);
-		} else if (t instanceof CancellationException) {
-			handler.onExpectedError(CodeDxError.CANCELLATION);
-		} else if (t instanceof InterruptedException) {
-			handler.onExpectedError(CodeDxError.INTERRUPTED);
-		} else if (t instanceof IOException) {
-			handler.onExpectedError(CodeDxError.FAILED_IO);
-		} else if (t instanceof InvalidCredentialsException) {
-			handler.onExpectedError(CodeDxError.INVALID_CREDENTIALS);
-		} else if (t instanceof HttpErrorCodeException) {
-			handler.onExpectedError(CodeDxError.HTTP_ERROR_CODE);
-		} else if (t instanceof TimeoutException) {
-			handler.onExpectedError(CodeDxError.READ_TIMEOUT_ERROR);
-		} else {
-			handler.onError(t);
-		}
-
-	}
-
-	/**
 	 * Class to extend async-http-client's {@link AsyncCompletionHandler} class
 	 * Used in all of the sendXYZRequest methods.
 	 */
-	// Class to extend AsyncCompletionHandler to work with async-http-library
-	private class ClientCompletionHandler<T> extends AsyncCompletionHandler<T> {
+	private class ApiCompletionHandler<T, E extends ExpectedError> extends AsyncCompletionHandler<T> {
 
 		private final Class<T> classType;
-		private final BaseClientHandler<T> handler;
+		private E error;
+		private final ApiHandler<T, E> handler;
 
-		private ClientCompletionHandler(Class<T> classType, BaseClientHandler<T> handler) {
+		private ApiCompletionHandler(Class<T> classType, E error, ApiHandler<T, E> handler) {
 			this.classType = classType;
+			this.error = error;
 			this.handler = handler;
 		}
-
 
 		@Override
 		@SuppressWarnings("unchecked")
@@ -234,150 +194,122 @@ public class CodeDxAPIClient {
 			}
 
 			//If not a success code, send to NonSuccess handler
-			handler.onNonSuccess(response.getStatusCode(), response.getResponseBody());
+			CodeDxError genericError = CodeDxError.decode(response.getStatusCode());
+			this.error.setError(genericError);
+			handler.onApiError(this.error);
 			return null;
 		}
 
 		@Override
 		public void onThrowable(Throwable t) {
-			handleAllErrors(handler, t);
+			handler.onThrowable(t);
 		}
-
-
-	}
-
-
-	//@DEVELOPER_NOTE For most of these client methods, a future is returned in case a blocking synchronous call is necessary.
-	//However in order to keep call asynchronous, ignore the future and use the BaseClientHandler interface to handle success, expected errors and unexpected errors
-
-	/**
-	 * Preforms an asynchronous POST request to the Code Dx Server at the apiPath and returns a Future for the response. Success and error cases handled by handler.
-	 *
-	 * @param apiPath   - The path that is added to the server URL to get to API endpoint
-	 * @param body      - The JSON string that will be the body of the POST Request
-	 * @param classType - The model class that the API response will be converted into
-	 * @param handler   - The BaseClientHandler that will handle all of the success and error cases. See {} for implementations of this interface
-	 * @return a future for the query. If you need to block on calling thread until server responds, use future.get(). Otherwise, ignore the return type
-	 */
-	private <T> Future<T> sendPostRequest(String apiPath, String body, Class<T> classType, BaseClientHandler<T> handler) {
-
-		String savedUrl = platformInterface.getSavedUrl();
-
-		//verify url
-		//If it's not valid, let handler handle the exception
-		URL url;
-		try {
-			url = new URL(savedUrl + apiPath);
-		} catch (MalformedURLException e) {
-			handler.onExpectedError(CodeDxError.INVALID_URL);
-			return null;
-		}
-
-		Future<T> f = client.preparePost(url.toString())
-				.setRealm(realm)
-				.setHeader("Content-Type", "application/json")
-				.setBody(body)
-				.setRequestTimeout(platformInterface.getReadTimeout())
-				.execute(new ClientCompletionHandler<>(classType, handler));
-
-		return f;
 	}
 
 	/**
-	 * Preforms an asynchronous POST request with a multipart body to the Code Dx Server at the apiPath and returns a Future for the response. Success and error cases handled by handler.
+	 * Preforms an asynchronous POST request to the Code Dx Server at the apiPath. Success and error cases handled by handler.
 	 *
-	 * @param apiPath   - The path that is added to the server URL to get to API endpoint
-	 * @param bodyParts - A list of {@link Part} objects that make up the Mutipart body. Part is included in async-http-client library
-	 * @param classType - The model class that the API response will be converted into
-	 * @param handler   - The BaseClientHandler that will handle all of the success and error cases. See {} for implementations of this interface
-	 * @return a future for the query. If you need to block on calling thread until server responds, use future.get(). Otherwise, ignore the return type
+	 * @param apiPath       - The path that is added to the server URL to get to API endpoint
+	 * @param body          - The JSON string that will be the body of the POST Request
+	 * @param classType     - The model class that the API response will be converted into
+	 * @param expectedError - The error class used for error handling.
+	 * @param handler       - The ApiHandler that will handle all of the success and error cases.
 	 */
-	private <T> Future<T> sendMultipartPostRequest(String apiPath, List<Part> bodyParts, Class<T> classType, BaseClientHandler<T> handler) {
-		String savedUrl = platformInterface.getSavedUrl();
-
-		//verify url
-		//If it's not valid, let handler handle the exception
+	private <T, E extends ExpectedError> void sendPostRequest(String apiPath, String body, Class<T> classType, E expectedError, ApiHandler<T, E> handler){
 		URL url;
-		try {
-			url = new URL(savedUrl + apiPath);
-		} catch (MalformedURLException e) {
-			handler.onExpectedError(CodeDxError.INVALID_URL);
-			return null;
-		}
-
-		Future<T> f = client.preparePost(url.toString())
-				.setRealm(realm)
-				.setHeader("Content-Type", "multipart/form-data")
-				.setBodyParts(bodyParts)
-				.setRequestTimeout(platformInterface.getReadTimeout())
-				.execute(new ClientCompletionHandler<>(classType, handler));
-
-		return f;
-	}
-
-	/**
-	 * Preforms an asynchronous GET request to the Code Dx Server at the apiPath and returns a Future for the response. Success and error cases handled by handler.
-	 *
-	 * @param apiPath   - The path that is added to the server URL to get to API endpoint
-	 * @param classType - The model class that the API response will be converted into
-	 * @param handler   - The BaseClientHandler that will handle all of the success and error cases. See {} for implementations of this interface
-	 * @return a future for the query. If you need to block on calling thread until server responds, use future.get(). Otherwise, ignore the return type
-	 */
-	private <T> Future<T> sendGetRequest(String apiPath, Class<T> classType, BaseClientHandler<T> handler) {
-
-		//verify url
-		//If it's not valid, let handler handle the exception
-		URL url;
-		try {
+		try{
 			url = new URL(platformInterface.getSavedUrl() + apiPath);
+			client.prepareGet(url.toString())
+					.setRealm(realm)
+					.setHeader("Content-Type", "application/json")
+					.setBody(body)
+					.setRequestTimeout(platformInterface.getReadTimeout())
+					.execute(new ApiCompletionHandler<>(classType, expectedError, handler));
 		} catch (MalformedURLException e) {
-			handler.onExpectedError(CodeDxError.INVALID_URL);
-			return null;
+			handler.onThrowable(e);
 		}
+	}
 
-		//Prepare and get response
-		Future<T> f = client.prepareGet(url.toString())
-				.setRealm(realm)
-				.setRequestTimeout(platformInterface.getReadTimeout())
-				.execute(new ClientCompletionHandler<>(classType, handler));
+	/**
+	 * Preforms an asynchronous POST request with a multipart body to the Code Dx Server at the apiPath. Success and error cases handled by handler.
+	 *
+	 * @param apiPath       - The path that is added to the server URL to get to API endpoint
+	 * @param bodyParts     - A list of {@link Part} objects that make up the Mutipart body. Part is included in async-http-client library
+	 * @param classType     - The model class that the API response will be converted into
+	 * @param expectedError - The error class used for error handling.
+	 * @param handler       - The ApiHandler that will handle all of the success and error cases.
+	 */
+	private <T, E extends ExpectedError> void sendMultipartPostRequest(String apiPath, List<Part> bodyParts, Class<T> classType, E expectedError, ApiHandler<T, E> handler) {
+		String savedUrl = platformInterface.getSavedUrl();
 
-		return f;
+		//verify url
+		//If it's not valid, let handler handle the exception
+		URL url;
+		try {
+			url = new URL(savedUrl + apiPath);
 
+			client.preparePost(url.toString())
+					.setRealm(realm)
+					.setHeader("Content-Type", "multipart/form-data")
+					.setBodyParts(bodyParts)
+					.setRequestTimeout(platformInterface.getReadTimeout())
+					.execute(new ApiCompletionHandler<>(classType, expectedError, handler));
+		} catch (MalformedURLException e) {
+			handler.onThrowable(e);
+		}
+	}
+
+	/**
+	 * Preforms an asynchronous GET request with a multipart body to the Code Dx Server at the apiPath. Success and error cases handled by handler.
+	 *
+	 * @param apiPath       - The path that is added to the server URL to get to API endpoint
+	 * @param classType     - The model class that the API response will be converted into
+	 * @param expectedError - The error class used for error handling.
+	 * @param handler       - The ApiHandler that will handle all of the success and error cases.
+	 */
+	private <T, E extends ExpectedError> void sendGetRequest(String apiPath, Class<T> classType, E expectedError, ApiHandler<T, E> handler){
+		URL url;
+		try{
+			url = new URL(platformInterface.getSavedUrl() + apiPath);
+
+			client.prepareGet(url.toString())
+					.setRealm(realm)
+					.setReadTimeout(platformInterface.getReadTimeout())
+					.execute(new ApiCompletionHandler<>(classType, expectedError, handler));
+		} catch (MalformedURLException e){
+			handler.onThrowable(e);
+		}
 	}
 
 	/**
 	 * Preforms an asynchronous PUT request to the Code Dx Server at the apiPath and returns a Future for the response. Success and error cases handled by handler.
 	 * If no response body is expected, enter null for classType
 	 *
-	 * @param apiPath   - The path that is added to the server URL to get to API endpoint
-	 * @param classType - The model class that the API response will be converted into
-	 * @param handler   - The BaseClientHandler that will handle all of the success and error cases. See {} for implementations of this interface
-	 * @return a future for the query. If you need to block on calling thread until server responds, use future.get(). Otherwise, ignore the return type
+	 * @param apiPath       - The path that is added to the server URL to get to API endpoint
+	 * @param classType     - The model class that the API response will be converted into
+	 * @param expectedError - The error class used for error handling.
+	 * @param handler       - The ApiHandler that will handle all of the success and error cases
 	 */
-	private <T> Future<T> sendPutRequest(String apiPath, String body, Class<T> classType, BaseClientHandler<T> handler) {
+	private <T, E extends ExpectedError> void sendPutRequest(String apiPath, String body, Class<T> classType, E expectedError, ApiHandler<T, E> handler) {
 
 		//verify url
 		//If it's not valid, let handler handle the exception
 		URL url;
 		try {
 			url = new URL(platformInterface.getSavedUrl() + apiPath);
+
+			//Prepare and get response
+			client.preparePut(url.toString())
+					.setRealm(realm)
+					.setBody(body)
+					.setRequestTimeout(platformInterface.getReadTimeout())
+					.execute(new ApiCompletionHandler<>(classType, expectedError, handler));
 		} catch (MalformedURLException e) {
-			handler.onExpectedError(CodeDxError.INVALID_URL);
-			return null;
+			handler.onThrowable(e);
 		}
-
-		//Prepare and get response
-		Future<T> f = client.preparePut(url.toString())
-				.setRealm(realm)
-				.setBody(body)
-				.setRequestTimeout(platformInterface.getReadTimeout())
-				.execute(new ClientCompletionHandler<>(classType, handler));
-
-		return f;
-
 	}
 
-	/**
+	/** TODO: get more info about the use case for this method
 	 * This method polls until the job indicates it completed, then execute either the failure or complete runnable depending on the status of the job. The polling rate determined by JOB_POLL_INTERVAL
 	 *
 	 * @param jobId         - The id of the job to wait for completion
@@ -386,7 +318,7 @@ public class CodeDxAPIClient {
 	 */
 	public void runOnJobCompletion(String jobId, Runnable afterComplete, Runnable afterFailure) {
 
-		//ScheduledExecutorService service = platformInterface.getAppScheduledExecutorService();
+		ScheduledExecutorService service = platformInterface.getAppScheduledExecutorService();
 
 		Runnable checkJobStatus = new Runnable() {
 
@@ -397,7 +329,7 @@ public class CodeDxAPIClient {
 			public void run() {
 
 				//make query to get job status. Can block on this
-				/*getJob(jobId, new UIClientHandler<Job>() {
+				getJob(jobId, new ApiHandler<Job, JobError>() {
 					@Override
 					public void onSuccess(Job result) {
 						// If completed, run the correct runnable. Else, schedule another check
@@ -407,39 +339,51 @@ public class CodeDxAPIClient {
 							afterFailure.run();
 						} else if (result.getStatus().equals("queued") || result.getStatus().equals("running")) { // If didn't complete, schedule another check
 							service.schedule(thisRunnable, JOB_POLL_INTERVAL, TimeUnit.MILLISECONDS);
-						} else { *//* Unexpected status. Fail job *//*
+						} else { /* Unexpected status. Fail job */
 							afterFailure.run();
 						}
 					}
-				});*/
+
+					@Override
+					public void onApiError(JobError err) {
+						// Maybe more than just
+						afterFailure.run();
+					}
+
+					@Override
+					public void onThrowable(Throwable err) {
+						// Maybe more than just
+						afterFailure.run();
+					}
+				});
 
 			}
 		};
 
 		//Schedule the first check
-		//service.schedule(checkJobStatus, 250, TimeUnit.MILLISECONDS);
+		service.schedule(checkJobStatus, 250, TimeUnit.MILLISECONDS);
 	}
 
 	/**
 	 * Calls api to get the job status
 	 *
 	 * @param jobId   - The id of the job
-	 * @param handler - The BaseClientHandler that will handle all of the success and error cases. See {} for implementations of this interface
+	 * @param handler - The ApiHandler that will handle all of the success and error cases
 	 */
-	public Future<Job> getJob(String jobId, BaseClientHandler<Job> handler) {
+	public void getJob(String jobId, ApiHandler<Job, JobError> handler) {
 		String apiPath = "/api/jobs/" + jobId;
-		return sendGetRequest(apiPath, Job.class, handler);
+		sendGetRequest(apiPath, Job.class, new JobError(), handler);
 	}
 
 	/**
 	 * Calls api to get the job result
 	 *
 	 * @param classType - The class to convert the response of the request to
-	 * @param handler   - The BaseClientHandler that will handle all of the success and error cases. See {} for implementations of this interface
+	 * @param handler   - The ApiHandler that will handle all of the success and error cases
 	 */
-	public <T> Future<T> getJobResult(Class<T> classType, BaseClientHandler<T> handler) {
+	public <T> void getJobResult(Class<T> classType, ApiHandler<T, JobError> handler) {
 		String apiPath = "/api/jobs";
-		return sendGetRequest(apiPath, classType, handler);
+		sendGetRequest(apiPath, classType, new JobError(), handler);
 	}
 
 
@@ -448,9 +392,9 @@ public class CodeDxAPIClient {
 	 *
 	 * @param realm    - The realm (username/password) to preform the query on
 	 * @param givenUrl - The server URL to test
-	 * @param handler  - The BaseClientHandler that will handle all of the success and error cases. See {} for implementations of this interface
+	 * @param handler  - The ApiHandler that will handle all of the success and error cases
 	 */
-	public void testConnection(Realm realm, String givenUrl, BaseClientHandler<Integer> handler) {
+	public void testConnection(Realm realm, String givenUrl, ApiHandler<Integer, GenericError> handler) {
 
 		//get response status code to see if able to access api
 
@@ -460,37 +404,19 @@ public class CodeDxAPIClient {
 		try {
 			url = new URL(givenUrl + "/api/projects");
 		} catch (MalformedURLException e) {
-			handler.onExpectedError(CodeDxError.INVALID_URL);
+			handler.onThrowable(e);
 			return;
 		}
 
 		//Prepare and get response
 		client.prepareGet(url.toString())
 				.setRealm(realm)
-				.execute(new AsyncCompletionHandler<Integer>() {
-							 @Override
-							 public Integer onCompleted(Response response) throws Exception {
-
-								 if (response.getStatusCode() >= 200 && response.getStatusCode() < 300) {
-									 handler.onSuccess(response.getStatusCode());
-									 return response.getStatusCode();
-								 }
-								 //If not a success code, send to NonSuccess handler
-								 handler.onNonSuccess(response.getStatusCode(), response.getResponseBody());
-								 return null;
-							 }
-
-							 @Override
-							 public void onThrowable(Throwable t) {
-								 handleAllErrors(handler, t);
-							 }
-						 }
-				);
+				.execute(new ApiCompletionHandler<>(Integer.class, new GenericError(), handler));
 
 	}
 
 	/**
-	 * Calls API to retrieve findings table. Logic to handle the Findings table results should be included in the BaseClientHandler onSuccess method passed into this function's parameters
+	 * Calls API to retrieve findings table. Logic to handle the Findings table results should be included in the ApiHandler onSuccess method passed into this function's parameters
 	 *
 	 * @param projectId      - The Code Dx project ID number to get the table for
 	 * @param pageSize       - How many findings to include in the response
@@ -498,12 +424,12 @@ public class CodeDxAPIClient {
 	 * @param sortDescriptor - A {@link SortDescriptor} object that determines what the results are sorted by
 	 * @param sortDirection  - A {@link SortDirection} object that determines if the sort is ascending or descending
 	 * @param filter         - A {@link Filter} object to filter the findings
-	 * @param handler        - The BaseClientHandler that will handle all of the success and error cases. See {} for implementations of this interface
-	 * @return a future of the response, or null on error. If you want to block on the calling thread use future.get() which blocks until the query finishes
+	 * @param handler        - The ApiHandler that will handle all of the success and error cases. See {} for implementations of this interface
 	 */
-	public Future<Finding[]> getFindingsTable(long projectId, long pageSize, long pageNumber, SortDescriptor sortDescriptor, SortDirection sortDirection, Filter filter, BaseClientHandler<Finding[]> handler) {
+	public void getFindingsTable(long projectId, long pageSize, long pageNumber, SortDescriptor sortDescriptor, SortDirection sortDirection, Filter filter, ApiHandler<Finding[], FindingError> handler) {
 
 		String apiPath = String.format("/x/projects/%s/findings/table?expand=descriptor,issue,results.descriptor", projectId);
+		FindingError error = new FindingError();
 
 		//Set up Query object
 		Query query = createQuery();
@@ -527,11 +453,12 @@ public class CodeDxAPIClient {
 		try {
 			body = JsonUtil.objectToJsonString(query);
 		} catch (IOException e) {
-			handler.onExpectedError(CodeDxError.FAILED_IO);
-			return null;
+			error.setError(CodeDxError.FAILED_IO);
+			handler.onApiError(error);
+			return;
 		}
 
-		return sendPostRequest(apiPath, body, Finding[].class, handler);
+		sendPostRequest(apiPath, body, Finding[].class, error, handler);
 	}
 
 	/**
@@ -539,10 +466,9 @@ public class CodeDxAPIClient {
 	 *
 	 * @param projectId - The Code Dx project ID number to get the table for
 	 * @param filter    - A {@link Filter} object to filter the findings count
-	 * @param handler   - The BaseClientHandler that will handle all of the success and error cases. See {} for implementations of this interface
-	 * @return a future of the response, or null on error. If you want to block on the calling thread use future.get() which blocks until the query finishes
+	 * @param handler   - The ApiHandler that will handle all of the success and error cases
 	 */
-	public Future<Count> getFindingsCount(long projectId, Filter filter, BaseClientHandler<Count> handler) {
+	public void getFindingsCount(long projectId, Filter filter, ApiHandler<Count, FindingError> handler) {
 
 		String apiPath = String.format("/x/projects/%s/findings/count", projectId);
 
@@ -557,11 +483,11 @@ public class CodeDxAPIClient {
 		try {
 			body = JsonUtil.objectToJsonString(query);
 		} catch (IOException e) {
-			handler.onExpectedError(CodeDxError.FAILED_IO);
-			return null;
+			handler.onThrowable(e);
+			return;
 		}
 
-		return sendPostRequest(apiPath, body, Count.class, handler);
+		sendPostRequest(apiPath, body, Count.class, new FindingError(), handler);
 
 	}
 
@@ -571,10 +497,9 @@ public class CodeDxAPIClient {
 	 * @param projectId - The Code Dx project ID number to get the group count
 	 * @param countBy   - A string to signify what to group the findings count by. Ie. "severity"
 	 * @param filter    - A {@link Filter} object to filter the group findings count
-	 * @param handler   - The BaseClientHandler that will handle all of the success and error cases. See {} for implementations of this interface
-	 * @return a future of the response, or null on error. If you want to block on the calling thread use future.get() which blocks until the query finishes
+	 * @param handler   - The ApiHandler that will handle all of the success and error cases
 	 */
-	public Future<GroupedCount[]> getFindingsGroupCount(long projectId, String countBy, Filter filter, BaseClientHandler<GroupedCount[]> handler) {
+	public void getFindingsGroupCount(long projectId, String countBy, Filter filter, ApiHandler<GroupedCount[], FindingError> handler) {
 
 		String apiPath = String.format("/x/projects/%s/findings/grouped-counts", projectId);
 
@@ -593,65 +518,47 @@ public class CodeDxAPIClient {
 		try {
 			body = JsonUtil.objectToJsonString(request);
 		} catch (IOException e) {
-			handler.onExpectedError(CodeDxError.FAILED_IO);
-			return null;
+			handler.onThrowable(e);
+			return;
 		}
 
-		return sendPostRequest(apiPath, body, GroupedCount[].class, handler);
+		sendPostRequest(apiPath, body, GroupedCount[].class, new FindingError(), handler);
 	}
 
 	/**
 	 * Calls API for projects available for a particular user
 	 *
-	 * @param handler - The BaseClientHandler that will handle all of the success and error cases. See {} for implementations of this interface
-	 * @return a future of the response, or null on error. If you want to block on the calling thread use future.get() which blocks until the query finishes
+	 * @param handler - The ApiHandler that will handle all of the success and error cases
 	 */
-	public Future<Projects> getProjects(BaseClientHandler<Projects> handler) {
+	public void getProjects(ApiHandler<Projects, ProjectError> handler) {
 		String apiPath = "/api/projects";
-		return sendGetRequest(apiPath, Projects.class, handler);
+		sendGetRequest(apiPath, Projects.class, new ProjectError(), handler);
+	}
+
+	public void createProject(String name, ApiHandler<Project, ProjectError> handler){
+		String apiPath = "/api/projects";
+		HashMap<String, String> map = new HashMap<>();
+		map.put("name", name);
+		String body;
+		try {
+			body = JsonUtil.objectToJsonString(map);
+		} catch (IOException e) {
+			handler.onThrowable(e);
+			return;
+		}
+		sendPutRequest(apiPath, body, Project.class, new ProjectError(), handler);
+
 	}
 
 	/**
 	 * Calls API for statuses for a particular project
 	 *
 	 * @param projectId - The project ID of the Code Dx project to get statuses for
-	 * @param handler   - The BaseClientHandler that will handle all of the success and error cases. See {} for implementations of this interface
-	 * @return a future of the response, or null on error. If you want to block on the calling thread use future.get() which blocks until the query finishes
+	 * @param handler   - The ApiHandler that will handle all of the success and error cases
 	 */
-	public Future<Statuses> getStatuses(long projectId, BaseClientHandler<Statuses> handler) {
-
-		return getStatusesHelper(projectId, new BaseClientHandler<Statuses>() {
-			@Override
-			public void onSuccess(Statuses result) {
-
-				// Need to set the IDs for statuses because they are not auto mapped by Jackson
-				//for (Map.Entry<String, Status> entry : result.getStatuses().entrySet()) {
-				//	entry.getValue().setId(entry.getKey());
-				//}
-
-				handler.onSuccess(result);
-			}
-
-			@Override
-			public void onError(Throwable t) {
-				handler.onError(t);
-			}
-
-			@Override
-			public void onExpectedError(CodeDxError e) {
-				handler.onExpectedError(e);
-			}
-
-			@Override
-			public void onNonSuccess(int errorCode, String message) {
-				handler.onNonSuccess(errorCode, message);
-			}
-		});
-	}
-
-	private Future<Statuses> getStatusesHelper(long projectId, BaseClientHandler<Statuses> handler) {
+	public void getStatuses(long projectId, ApiHandler<Statuses, FindingError> handler){
 		String apiPath = "/x/projects/" + projectId + "/statuses";
-		return sendGetRequest(apiPath, Statuses.class, handler);
+		sendGetRequest(apiPath, Statuses.class, new FindingError(), handler);
 	}
 
 	/**
@@ -659,10 +566,9 @@ public class CodeDxAPIClient {
 	 *
 	 * @param findingId - The finding ID of the Code Dx finding to set statuses for
 	 * @param statusId  - The ID of the status to set finding to
-	 * @param handler   - The BaseClientHandler that will handle all of the success and error cases. See {} for implementations of this interface
-	 * @return a future of the response, or null on error. If you want to block on the calling thread use future.get() which blocks until the query finishes
+	 * @param handler   - The ApiHandler that will handle all of the success and error cases
 	 */
-	public void setStatus(long findingId, String statusId, BaseClientHandler<Integer> handler) {
+	public void setStatus(long findingId, String statusId, ApiHandler<Integer, FindingError> handler) {
 		String apiPath = "/x/findings/" + findingId + "/status";
 
 		//build request body
@@ -672,12 +578,12 @@ public class CodeDxAPIClient {
 		try {
 			body = JsonUtil.objectToJsonString(payload);
 		} catch (IOException e) {
-			handler.onExpectedError(CodeDxError.FAILED_IO);
+			handler.onThrowable(e);
 			return;
 		}
 
 		//pass in null as class type because there's no response body, only response code which should be handled by handler
-		sendPutRequest(apiPath, body, Integer.class, handler);
+		sendPutRequest(apiPath, body, Integer.class, new FindingError(), handler);
 	}
 
 	/**
@@ -686,10 +592,9 @@ public class CodeDxAPIClient {
 	 * @param projectId  - Project ID that the findings are in
 	 * @param findingIds - Array of finding Ids to set the status of
 	 * @param statusId   - The ID of the status to set findings to
-	 * @param handler    - The BaseClientHandler that will handle all of the success and error cases. See {} for implementations of this interface
-	 * @return a future of the response, or null on error. If you want to block on the calling thread use future.get() which blocks until the query finishes
+	 * @param handler    - The ApiHandler that will handle all of the success and error cases
 	 */
-	public Future<Job> setStatuses(long projectId, long[] findingIds, String statusId, BaseClientHandler<Job> handler) {
+	public void setStatuses(long projectId, long[] findingIds, String statusId, ApiHandler<Job, FindingError> handler) {
 
 		String apiPath = "/x/projects/" + projectId + "/bulk-status-update";
 
@@ -704,11 +609,11 @@ public class CodeDxAPIClient {
 		try {
 			body = JsonUtil.objectToJsonString(payload);
 		} catch (IOException e) {
-			handler.onExpectedError(CodeDxError.FAILED_IO);
-			return null;
+			handler.onThrowable(e);
+			return;
 		}
 
-		return sendPostRequest(apiPath, body, Job.class, handler);
+		sendPostRequest(apiPath, body, Job.class, new FindingError(), handler);
 
 	}
 
@@ -717,63 +622,21 @@ public class CodeDxAPIClient {
 	 *
 	 * @param projectId - Project ID that the findings are in
 	 * @param filePath  - The filepath to the file
-	 * @param handler   - The FileContentClientHandler that will handle all of the success and error cases. See {} for implementations of this interface
-	 * @return a future of the response, or null on error. If you want to block on the calling thread use future.get() which blocks until the query finishes
+	 * @param handler   - The ApiHandler that will handle all of the success and error cases. See {} for implementations of this interface
 	 */
-	public Future<String> getFileContent(long projectId, String filePath, FileContentClientHandler<String> handler) {
+	public void getFileContent(long projectId, String filePath, ApiHandler<String, FileContentError> handler) {
 		String apiPath = "/x/projects/" + projectId + "/files/tree/" + filePath;
-
-		BaseClientHandler<String> baseClientHandler = new BaseClientHandler<String>() {
-			@Override
-			public void onSuccess(String result) {
-				handler.onSuccess(result);
-			}
-
-			@Override
-			public void onError(Throwable t) {
-				handler.onError(t);
-			}
-
-			@Override
-			public void onNonSuccess(int errorCode, String message) {
-
-				//Handle the possible error codes calling the correct FileContentClientHandler methods
-				switch (errorCode) {
-					case 403:
-						onExpectedError(CodeDxError.INVALID_CREDENTIALS);
-						break;
-					case 404:
-						handler.onNotFoundResponse(message);
-						break;
-					case 415:
-						handler.onUnsupportedMediaType(message);
-						break;
-					case 500:
-						handler.onInternalError(message);
-						break;
-					default:
-						onExpectedError(CodeDxError.HTTP_ERROR_CODE);
-				}
-			}
-
-			@Override
-			public void onExpectedError(CodeDxError e) {
-				handler.onExpectedError(e);
-			}
-		};
-
-		return sendGetRequest(apiPath, String.class, baseClientHandler);
+		sendGetRequest(apiPath, String.class, new FileContentError(), handler);
 	}
 
 	/**
-	 * Calls API to get the mappings for a list of files. Called form helper function {@link #getMappings(long, List, BaseClientHandler)}
+	 * Calls API to get the mappings for a list of files.
 	 *
 	 * @param projectId - Project ID that the findings are in
 	 * @param files     - A list of filepaths
-	 * @param handler   - The BaseClientHandler that will handle all of the success and error cases. See {} for implementations of this interface
-	 * @return a future of the response, or null on error. If you want to block on the calling thread use future.get() which blocks until the query finishes
+	 * @param handler   - The ApiHandler that will handle all of the success and error cases.
 	 */
-	private Future<MappingsResponse> getMappingsResponse(long projectId, List<String> files, BaseClientHandler<MappingsResponse> handler) {
+	private void getMappings(long projectId, List<String> files, ApiHandler<MappingsResponse, MappingsError> handler) {
 
 		String apiPath = String.format("/x/projects/%s/files/mappings", projectId);
 
@@ -785,56 +648,11 @@ public class CodeDxAPIClient {
 		try {
 			body = JsonUtil.objectToJsonString(request);
 		} catch (IOException e) {
-			handler.onExpectedError(CodeDxError.FAILED_IO);
-			return null;
+			handler.onThrowable(e);
+			return;
 		}
 
-		return sendPostRequest(apiPath, body, MappingsResponse.class, handler);
-	}
-
-	/**
-	 * Calls API to get the mappings for a list of files. Helper function for {@link #getMappingsResponse(long, List, BaseClientHandler)} to abstract away the "MappingsResponse" and converting it to the Map
-	 *
-	 * @param projectId - Project ID that the findings are in
-	 * @param files     - A list of filepaths
-	 * @param handler   - The BaseClientHandler that will handle all of the success and error cases. See {} for implementations of this interface
-	 * @return a future of the response, or null on error. If you want to block on the calling thread use future.get() which blocks until the query finishes
-	 */
-	public void getMappings(long projectId, List<String> files, BaseClientHandler<Map<String, ProjectFile>> handler) {
-
-		getMappingsResponse(projectId, files, new BaseClientHandler<MappingsResponse>() {
-			@Override
-			public void onSuccess(MappingsResponse result) {
-
-				Map<String, ProjectFile> mappings = new HashMap<>();
-
-				if (result != null) {
-					ObjectMapper mapper = new ObjectMapper();
-					for (Map.Entry<String, Object> any : result.any().entrySet()) {
-						ProjectFile mapping = mapper.convertValue(any.getValue(), ProjectFile.class);
-						mappings.put(any.getKey(), mapping);
-					}
-				}
-
-				handler.onSuccess(mappings);
-			}
-
-			@Override
-			public void onError(Throwable t) {
-				handler.onError(t);
-			}
-
-			@Override
-			public void onExpectedError(CodeDxError e) {
-				handler.onExpectedError(e);
-			}
-
-			@Override
-			public void onNonSuccess(int errorCode, String message) {
-				handler.onNonSuccess(errorCode, message);
-			}
-		});
-
+		sendPostRequest(apiPath, body, MappingsResponse.class, new MappingsError(), handler);
 	}
 
 	/**
@@ -842,10 +660,9 @@ public class CodeDxAPIClient {
 	 *
 	 * @param projectId - Project ID that the findings are in
 	 * @param inputs    - An array of files, or a zip file to be analyzed
-	 * @param handler   - The BaseClientHandler that will handle all of the success and error cases. See {} for implementations of this interface
-	 * @return a future of the response, or null on error. If you want to block on the calling thread use future.get() which blocks until the query finishes
+	 * @param handler   - The ApiHandler that will handle all of the success and error cases.
 	 */
-	public Future<CreateAnalysisRunResponse> createAnalysisRun(long projectId, File[] inputs, BaseClientHandler<CreateAnalysisRunResponse> handler) {
+	public void createAnalysisRun(long projectId, File[] inputs, ApiHandler<CreateAnalysisRunResponse, AnalysisError> handler) {
 
 		String apiPath = String.format("/api/projects/%s/analysis", projectId);
 
@@ -858,8 +675,7 @@ public class CodeDxAPIClient {
 			filePartList.add(filePart);
 		}
 
-		return sendMultipartPostRequest(apiPath, filePartList, CreateAnalysisRunResponse.class, handler);
-
+		sendMultipartPostRequest(apiPath, filePartList, CreateAnalysisRunResponse.class, new AnalysisError(), handler);
 	}
 
 }

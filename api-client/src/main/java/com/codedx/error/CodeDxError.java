@@ -6,7 +6,7 @@
  * FileName: CodeDxError.java
  */
 
-package com.codedx.handlers;
+package com.codedx.error;
 
 public enum CodeDxError {
 
@@ -18,13 +18,20 @@ public enum CodeDxError {
 	FAILED_CONNECT("FAILED_CONNECT: The connection to the server failed."),
 	FAILED_IO("FAILED_IO: I/O Operation failed."),
 	NULL_POINTER("NULL_POINTER: A null value occurred where it was not expected."),
+	// 400
+	BAD_REQUEST("BAD_REQUEST: invalid request body"),
+	// 403
 	INVALID_CREDENTIALS("INVALID_CREDENTIALS: The wrong credentials were provided for the given server"),
+	//404
+	NOT_FOUND("404: Not Found"),
+	// 409
+	CONFLICT("CONFLICT: The request could not be completed due to a conflict"),
+	// 415
+	UNSUPPORTED_MEDIA_TYPE("UNSUPPORTED_MEDIA_TYPE: The server refuses to accept the request because the payload format is in an unsupported format."),
 	HTTP_ERROR_CODE("HTTP_ERROR_CODE: An error code was returned from the server."),
 	READ_TIMEOUT_ERROR("READ_TIMEOUT_ERROR: A query took too long to complete and timed out."),
 	SSL_ERROR("SSL_ERROR: The connection to the server failed because of an ssl error."),
-	//Intellij Error codes
-	FILE_NOT_FOUND("FILE_NOT_FOUND: The selected file could not be found in current project."),
-	NO_ROW_SELECTED("NO_ROW_SELECTED: The operation could not be performed because no row from the table was selected.");
+	UNEXPECTED("UNEXPECTED: The error that occured was unexpected");
 
 
 	private final String description;
@@ -40,6 +47,15 @@ public enum CodeDxError {
 	@Override
 	public String toString() {
 		return description;
+	}
+
+	public static CodeDxError decode(int errorCode){
+		switch (errorCode){
+			case 403: return INVALID_CREDENTIALS;
+			case 404: return NOT_FOUND;
+			case 409: return CONFLICT;
+			default: return UNEXPECTED;
+		}
 	}
 
 }
