@@ -35,7 +35,6 @@ lazy val publishingSettings = Seq(
    pomIncludeRepository := { _ => false },
    pomExtra :=
       <url>https://github.com/codedx/codedx-api-client-java</url>
-         <description>Client SDK for Code Dx API</description>
          <scm>
             <connection>scm:git:git@github.com:codedx/codedx-api-client-java.git</connection>
             <developerConnection>scm:git:git@github.com:codedx/codedx-api-client-java.git</developerConnection>
