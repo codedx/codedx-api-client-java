@@ -2,7 +2,7 @@ lazy val root = (project in file(".")).
   settings(
     organization := "com.codedx",
     name := "codedx-api-client-java",
-    version := "3.5.0-SNAPSHOT",
+    version := "3.5.0",
     scalaVersion := "2.11.4",
     crossPaths := false,
     scalacOptions ++= Seq("-feature"),
